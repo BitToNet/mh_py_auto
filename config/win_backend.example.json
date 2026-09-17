@@ -1,0 +1,45 @@
+{
+  "_comment": "时空客户端 Windows 后端配置模板。复制为 config/win_backend.json 即自动生效（该文件名会被 win_device 自动加载）。所有字段都有默认值，只需要覆盖想改的。",
+
+  "designWidth": 1600,
+  "designHeight": 900,
+
+  "_comment_capture": "captureMethod=auto 时按 captureOrder 顺序自动探测并缓存最优后端；实机探测（tools/win_probe.py）有结论后可以把最快/最稳的放最前面，或直接写死 captureMethod。",
+  "captureMethod": "auto",
+  "captureOrder": [
+    "printwindow_renderfull",
+    "printwindow_client",
+    "bitblt_client",
+    "printwindow_window",
+    "bitblt_window"
+  ],
+  "captureOrderChild": [
+    "printwindow_renderfull",
+    "printwindow_client",
+    "bitblt_client"
+  ],
+  "blackRatioMax": 0.995,
+  "minColors": 6,
+
+  "_comment_input": "inputMethod=auto 时按 inputOrder 顺序尝试；postmessage/sendmessage 是后台消息（不抢前台），sendinput 是真实鼠标键盘（兼容性最好但会占用键鼠）。textOrder 里 unicode 走真实键盘事件，wm_char 纯后台，clipboard 会改写系统剪贴板。",
+  "inputMethod": "auto",
+  "_comment_inputTarget": "输入发给谁：top=顶层窗口（默认，坐标加渲染子窗口偏移）；capture=直接发给截图目标（渲染子窗口），坐标相对该子窗口。实机探测若发现后台点击对顶层无效、必须点画面子窗口，就把这里改成 capture，不用改代码。",
+  "inputTarget": "top",
+  "textMethod": "auto",
+  "inputOrder": ["postmessage", "sendmessage", "sendinput"],
+  "textOrder": ["unicode", "wm_char", "clipboard"],
+  "jitterRadius": 2,
+  "pressGapMs": 40,
+  "activateBeforeInput": true,
+
+  "_comment_window": "autoResize=true 时每次接入设备会尝试把客户区改成 designWidth x designHeight；改不了也没关系，截图与坐标会自动按比例缩放。",
+  "autoResize": false,
+
+  "_comment_client": "客户端的启动器路径与安装目录；留空时自动从运行中的进程推断，推断不到会报错提示配置。",
+  "launcherPath": "",
+  "installDir": "",
+
+  "gameExePatterns": ["mygame", "mymain", "mhxy", "xyq", "shikong"],
+  "launcherExePatterns": ["mypclauncher", "mylauncher", "mypreloader", "mypclauncherupdater"],
+  "titleKeywords": ["梦幻西游", "时空"]
+}
