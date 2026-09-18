@@ -298,7 +298,8 @@ def _enumeration_broken(probe_report: Optional[Dict[str, Any]]) -> bool:
 def evaluate_verdict(probe_step: Dict[str, Any],
                      recommendation: Dict[str, Any],
                      smoke_step: Dict[str, Any],
-                     with_input: bool = False) -> Dict[str, Any]:
+                     with_input: bool = False,
+                     config_written: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """把三步的结果翻译成"能不能用 + 下一步做什么"。"""
     problems: List[str] = []
     probe_report = probe_step.get("report")
@@ -360,6 +361,15 @@ def evaluate_verdict(probe_step: Dict[str, Any],
         if failed:
             names = "、".join(str(item.get("name")) for item in failed[:6])
             problems.append("冒烟检查未通过：%s" % names)
+
+    # 写配置失败必须算问题：否则报告说"通过"，而运行时用的还是旧配置
+    # （最常见的失败原因是 config\win_backend.json 已存在、没加 --force）。
+    if isinstance(config_written, dict) and int(config_written.get("exitCode") or 0) != 0:
+        problems.append(
+            "推荐配置没有写进 config\\win_backend.json（写配置退出码 %s）："
+            "运行时用的仍是原来的配置文件，上面那份推荐等于没生效；"
+            "确认要覆盖请加 --force 重跑。" % config_written.get("exitCode")
+        )
 
     next_steps: List[str] = []
     if problems:
@@ -678,7 +688,7 @@ def run_acceptance(out_dir: str, *,
             log("      退出码 %s" % config_written.get("exitCode"))
 
     verdict = evaluate_verdict(probe_step, recommendation, smoke_step,
-                               with_input=with_input)
+                               with_input=with_input, config_written=config_written)
     report = build_report(
         steps=steps,
         probe_step=probe_step,

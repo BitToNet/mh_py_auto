@@ -99,6 +99,42 @@ class EnumerationBrokenTest(unittest.TestCase):
         self.assertIn("确认客户端已启动", warning)
 
 
+class LauncherWindowTest(unittest.TestCase):
+    """实测到的是启动器/登录窗口时，必须说清"这不代表游戏窗口"。
+
+    实机第一次验收就是这样：候选窗口是 MyTabCtrl_x64r.exe（客户区 1024x806，
+    带 MPAY_LOGIN 登录子窗口），不是 MyGame_x64r.exe —— 在它身上测出的后端
+    不能用来给游戏窗口定配置。
+    """
+
+    def launcher_report(self, **extra):
+        report = make_report(methods=all_methods_ok())
+        report["meta"]["windowScan"] = {
+            "totalTopLevel": 19, "candidates": 1, "enumerationBroken": False,
+            "gameProcessFound": False, "candidateExes": ["MyTabCtrl_x64r.exe"],
+            **extra,
+        }
+        return report
+
+    def test_flag_detects_launcher_only_measurement(self):
+        self.assertTrue(win_recommend.target_is_not_game(self.launcher_report()))
+
+    def test_flag_is_quiet_without_the_field_or_when_game_found(self):
+        self.assertFalse(win_recommend.target_is_not_game(make_report()))
+        self.assertFalse(win_recommend.target_is_not_game(
+            self.launcher_report(gameProcessFound=True)))
+        # 有 candidates=0 时是"枚举失效"那条路，不该重复报这里
+        self.assertFalse(win_recommend.target_is_not_game(
+            self.launcher_report(candidates=0)))
+
+    def test_warning_names_the_actual_process(self):
+        result = win_recommend.recommend(self.launcher_report())
+        warning = " ".join(result["warnings"])
+        self.assertIn("不是游戏主程序", warning)
+        self.assertIn("MyTabCtrl_x64r.exe", warning)
+        self.assertIn("不能代表游戏窗口", warning)
+
+
 class RecommendCoreTest(unittest.TestCase):
     def test_all_backends_usable_keeps_default_order(self):
         result = win_recommend.recommend(make_report(methods=all_methods_ok()))
@@ -137,11 +173,25 @@ class RecommendCoreTest(unittest.TestCase):
         result = win_recommend.recommend(make_report(methods=methods))
         self.assertNotIn(win_capture.DEFAULT_ORDER[1], result["config"]["captureOrder"][:1])
 
-    def test_smoke_chosen_method_goes_first(self):
+    def test_smoke_choice_does_not_outrank_capability_order(self):
+        """冒烟里的"设备层选中"只是当前配置顺序的产物，不能把 bitblt 顶到 renderfull 前面。
+
+        否则会自我强化：旧配置让冒烟选中 bitblt → 新配置第一位还是 bitblt →
+        "被遮挡也能取图"的 printwindow_renderfull 永远用不上，而项目的整个前提就是后台截图。
+        """
         smoke = {"devices": [{"capture": {"chosen": "bitblt_client"}}], "results": []}
         result = win_recommend.recommend(make_report(methods=all_methods_ok()), smoke)
-        self.assertEqual(result["config"]["captureOrder"][0], "bitblt_client")
+        self.assertEqual(result["config"]["captureOrder"][0], "printwindow_renderfull")
+        self.assertFalse(any("只能靠 BitBlt" in line for line in result["warnings"]),
+                         result["warnings"])
+        # 仍然要在 notes 里解释清楚"冒烟选的和推荐的不一样，以及为什么"
         self.assertTrue(any("冒烟" in line for line in result["notes"]), result["notes"])
+
+    def test_smoke_agreement_is_noted(self):
+        smoke = {"devices": [{"capture": {"chosen": "printwindow_renderfull"}}], "results": []}
+        result = win_recommend.recommend(make_report(methods=all_methods_ok()), smoke)
+        self.assertEqual(result["config"]["captureOrder"][0], "printwindow_renderfull")
+        self.assertTrue(any("一致" in line for line in result["notes"]), result["notes"])
 
     def test_smoke_failed_checks_are_surfaced(self):
         smoke = {"devices": [], "results": [{"name": "input", "ok": False}]}

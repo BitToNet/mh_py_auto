@@ -126,6 +126,31 @@ class VerdictTest(unittest.TestCase):
         self.assertFalse(verdict["ok"])
         self.assertTrue(any("没有找到候选窗口" in item for item in verdict["problems"]))
 
+    def test_failed_config_write_is_a_problem(self):
+        """写配置失败必须算问题：实机上报告说"通过"，但配置根本没写进去。
+
+        最典型的失败原因是 config\\win_backend.json 已存在、没加 --force，
+        这时运行时用的还是旧配置（实机上是一份只有两个后端的旧文件）。
+        """
+        report = make_report(methods=all_methods_ok())
+        written = {"exitCode": 1, "output": "配置已存在，未覆盖……"}
+        verdict = win_acceptance.evaluate_verdict(
+            probe_step(report), good_recommendation(report),
+            smoke_step(smoke_report()), config_written=written)
+        self.assertFalse(verdict["ok"])
+        problems = " ".join(verdict["problems"])
+        self.assertIn("没有写进 config", problems)
+        self.assertIn("--force", problems)
+
+    def test_successful_or_absent_config_write_is_not_a_problem(self):
+        report = make_report(methods=all_methods_ok())
+        for written in (None, {"exitCode": 0, "output": "已写入……"}):
+            with self.subTest(written=written):
+                verdict = win_acceptance.evaluate_verdict(
+                    probe_step(report), good_recommendation(report),
+                    smoke_step(smoke_report()), config_written=written)
+                self.assertTrue(verdict["ok"], verdict["problems"])
+
     def test_broken_enumeration_is_not_reported_as_missing_client(self):
         """枚举到 0 个窗口时，结论必须是"枚举机制失效"，不能让人去重启游戏。"""
         report = make_report(methods=[], targets=False)

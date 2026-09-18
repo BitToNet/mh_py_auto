@@ -137,6 +137,23 @@ def enumeration_broken(report: Dict[str, Any]) -> bool:
     return bool(meta.get("enumerationBroken"))
 
 
+def target_is_not_game(report: Dict[str, Any]) -> bool:
+    """探测的候选窗口是否**不是**游戏主程序（例如只是启动器/登录窗口）。
+
+    标题一样、但进程名没命中 gameExePatterns 时，在它身上测出来的截图/输入后端
+    不能代表游戏窗口；只有老报告没有这个字段时才不提示。
+    """
+    meta = report.get("meta")
+    if not isinstance(meta, dict):
+        return False
+    scan = meta.get("windowScan")
+    if not isinstance(scan, dict):
+        return False
+    if scan.get("gameProcessFound") is not False:
+        return False
+    return bool(scan.get("candidates"))
+
+
 def recommend(report: Dict[str, Any],
               smoke: Optional[Dict[str, Any]] = None,
               black_ratio_max: float = win_capture.DEFAULT_BLACK_RATIO_MAX,
@@ -162,6 +179,13 @@ def recommend(report: Dict[str, Any],
         return {"config": config, "notes": notes, "warnings": warnings, "measured": False}
 
     tag = target_tag(target)
+    if target_is_not_game(report):
+        exes = "、".join((report.get("meta") or {}).get("windowScan", {}).get("candidateExes") or [])
+        warnings.append(
+            "实测的窗口不是游戏主程序（进程名未命中 gameExePatterns%s）：多半是启动器/登录"
+            "窗口，下面这份截图/输入配置**不能代表游戏窗口**；请先登录进游戏画面再重跑探测。"
+            % (("：" + exes) if exes else "")
+        )
     others = [item for item in (report.get("targets") or [])
               if isinstance(item, dict) and target_tag(item) != tag]
     if others:
@@ -185,9 +209,18 @@ def recommend(report: Dict[str, Any],
                         "先确认游戏画面正常显示、窗口未最小化，再用管理员权限重跑探测。")
     else:
         order = _order_with(working, win_capture.DEFAULT_ORDER)
+        # 冒烟报告里的"设备层实际选中"只是**当前配置顺序**的产物
+        # （CaptureStrategy 取顺序里第一个可用的后端），它不是"哪个后端更好"的证据。
+        # 若拿它去改推荐顺序就会自我强化：旧配置让冒烟选中 bitblt → 把 bitblt 推到新
+        # 配置第一位 → 从此永远丢掉"被遮挡也能取图"的 printwindow_renderfull。
+        # 所以排在最前的一律按能力优先，冒烟结果只用来核对和解释。
         if smoke_chosen and smoke_chosen in working:
-            order = [smoke_chosen] + [name for name in order if name != smoke_chosen]
-            notes.append("截图后端按冒烟结果把 %s 放第一位。" % smoke_chosen)
+            if smoke_chosen == order[0]:
+                notes.append("冒烟时设备层选中的后端 %s 与推荐首选一致。" % smoke_chosen)
+            else:
+                notes.append("冒烟时设备层实际选中 %s（那是当前配置顺序的结果）；"
+                             "这里仍按能力优先把 %s 排在最前——它被别的窗口盖住时也能取到画面。"
+                             % (smoke_chosen, order[0]))
         config["captureOrder"] = order
         # 子窗口渲染目标没有窗口边框：窗口级后端放在这里没有意义，只保留 CHILD_ORDER 里的
         child_working = [name for name in working if name in win_capture.CHILD_ORDER]

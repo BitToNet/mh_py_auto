@@ -223,7 +223,10 @@ CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 
 # 候选窗口的识别关键字（进程名 / 标题关键字），大小写不敏感
+# 注意：这里面**混着启动器**（mypclauncher/mylauncher/mypreloader），它们也是候选窗口，
+# 但不是游戏主程序。判断"测到的到底是不是游戏窗口"要用下面那份不含启动器的列表。
 DEFAULT_EXE_KEYWORDS = ["mygame", "mypclauncher", "mylauncher", "mypreloader", "mygame_x64r"]
+DEFAULT_GAME_EXE_KEYWORDS = ["mygame", "mygame_x64r", "mymain"]
 DEFAULT_TITLE_KEYWORDS = ["梦幻西游", "时空", "mhxy"]
 
 SHOT_DIR_NAME = "probe_shots"
@@ -641,12 +644,17 @@ def _enum_child_windows(hwnd: int) -> List[Dict[str, Any]]:
     return out
 
 
+def _matches_exe_keywords(exe_name: str, exe_keywords: Sequence[str]) -> bool:
+    """进程名是否命中 --exe-keyword（= 它才是游戏主程序，而不是启动器/登录窗口）。"""
+    exe_l = (exe_name or "").lower()
+    return any(k and k in exe_l for k in exe_keywords)
+
+
 def _looks_like_candidate(exe_name: str, title: str, cls: str,
                           exe_keywords: Sequence[str], title_keywords: Sequence[str]) -> bool:
-    exe_l = exe_name.lower()
     title_l = title.lower()
     cls_l = cls.lower()
-    if any(k and k in exe_l for k in exe_keywords):
+    if _matches_exe_keywords(exe_name, exe_keywords):
         return True
     if any(k and k in title_l for k in title_keywords):
         return True
@@ -1304,6 +1312,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     os.makedirs(os.path.join(out_dir, SHOT_DIR_NAME), exist_ok=True)
 
     exe_keywords = list(DEFAULT_EXE_KEYWORDS) + list(args.exe_keyword or [])
+    # 游戏主程序关键字：默认不含启动器，用户 --exe-keyword 指定的也算
+    game_exe_keywords = list(DEFAULT_GAME_EXE_KEYWORDS) + list(args.exe_keyword or [])
     title_keywords = list(DEFAULT_TITLE_KEYWORDS) + list(args.title_keyword or [])
 
     print("=" * 78)
@@ -1324,6 +1334,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     candidates = [w for w in windows if w.is_candidate]
     total_windows = len(windows)
+    # 候选窗口可能是**启动器/登录窗口**：它标题一样（"梦幻西游：时空"），但进程不是
+    # 游戏主程序、客户区也不是游戏画面。在它身上测出来的截图/输入后端不代表游戏窗口，
+    # 所以要明确区分"找到了窗口"和"找到了游戏主程序"。
+    game_windows = [w for w in candidates if _matches_exe_keywords(w.exe_name, game_exe_keywords)]
+    game_process_found = bool(game_windows)
     # 交互式 Windows 桌面上永远存在可见顶层窗口（桌面、任务栏、输入法、其它程序），
     # 一个都枚举不到说明"枚举"这一步本身不成立：要么枚举回调/ctypes 层出错
     # （异常被 ctypes 吞掉，比如回调原型写错），要么本进程不在交互式桌面会话
@@ -1354,6 +1369,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("   2) 用管理员权限重新运行本脚本")
         print("   3) 若无标题窗口未被识别，可用 --exe-keyword/--title-keyword 指定关键字")
         print("   4) 或者加 --all-windows 看看完整窗口列表，再用 --hwnd 指定目标")
+    elif not game_process_found:
+        exes = "、".join(sorted({w.exe_name for w in candidates if w.exe_name}))
+        print()
+        print("！！找到的候选窗口不是游戏主程序（进程名没命中游戏关键字）：%s" % exes)
+        print("   这多半是启动器 / 登录窗口：标题一样，但画面不是游戏内容。")
+        print("   在它身上测到的截图/输入后端**不能代表游戏窗口**。")
+        print("   请先登录、进到游戏画面里，再重跑本脚本；")
+        print("   如果游戏进程名不在默认关键字里，用 --exe-keyword 指定它。")
     print()
 
     # 目标窗口筛选
@@ -1374,11 +1397,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "exe_keywords": exe_keywords,
             "title_keywords": title_keywords,
             "deps": dependency_versions(),
-            # 枚举自检：0 个顶层窗口 = 枚举本身失效，不是"没找到游戏窗口"
+            # 枚举自检：0 个顶层窗口 = 枚举本身失效，不是"没找到游戏窗口"；
+            # gameProcessFound=False 则说明找到的只是启动器/登录窗口
             "windowScan": {
                 "totalTopLevel": total_windows,
                 "candidates": len(candidates),
                 "enumerationBroken": enumeration_broken,
+                "gameProcessFound": game_process_found,
+                "candidateExes": sorted({w.exe_name for w in candidates if w.exe_name}),
             },
         },
         "windows": [asdict(w) for w in (windows if args.all_windows else candidates)],

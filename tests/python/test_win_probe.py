@@ -634,6 +634,74 @@ class ProbeMainTest(unittest.TestCase):
         self.assertGreater(scan["totalTopLevel"], 0)
         self.assertFalse(scan["enumerationBroken"])
 
+    def test_launcher_only_candidate_is_flagged(self):
+        """只有启动器/登录窗口时，必须说清"这不代表游戏窗口"。
+
+        实机第一次验收就是这个情况：候选窗口进程是 MyTabCtrl_x64r.exe
+        （客户区 1024x806，带 MPAY_LOGIN 登录子窗口），不是游戏主程序；
+        标题一样所以照样被当成候选。在它身上测的后端不能给游戏窗口定配置。
+        """
+        self.fake = FullFakeProbeWin(with_game=False)
+        self.fake.windows[0x3000] = {
+            "title": "梦幻西游：时空", "class": "__my_tabctrl_winclass_243e71db__",
+            "pid": 23520, "visible": True, "client": (1024, 806), "origin": (0, 0),
+            "top": True,
+        }
+        self.fake.foreground = 0x3000
+        # 假 API 默认把所有进程都说成 MyGame_x64r.exe，这里换成实机观察到的启动器进程名
+        self.fake.process_path = lambda _pid: "/games/shikong/MyTabCtrl_x64r.exe"
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = win_probe.main(["--out", self.tmp.name, "--no-input", "--no-occlusion"])
+        self.assertEqual(code, 0)
+        scan = self.report()["meta"]["windowScan"]
+        self.assertFalse(scan["enumerationBroken"])
+        self.assertEqual(scan["candidates"], 1)
+        self.assertFalse(scan["gameProcessFound"])
+        self.assertEqual(scan["candidateExes"], ["MyTabCtrl_x64r.exe"])
+        output = buffer.getvalue()
+        self.assertIn("不是游戏主程序", output)
+        self.assertIn("启动器", output)
+
+    def test_game_window_is_not_flagged(self):
+        self.assertEqual(self.run_probe("--no-input", "--no-occlusion", "--no-save-shots"), 0)
+        scan = self.report()["meta"]["windowScan"]
+        self.assertTrue(scan["gameProcessFound"])
+        self.assertEqual(scan["candidateExes"], ["MyGame_x64r.exe"])
+
+    def test_launcher_process_is_not_mistaken_for_the_game(self):
+        """启动器（MyPCLauncher/MyPreloader）也是候选窗口，但不能算"找到游戏主程序"。"""
+        self.fake = FullFakeProbeWin(with_game=False)
+        self.fake.windows[0x4000] = {
+            "title": "梦幻西游：时空", "class": "__my_tabctrl_winclass__",
+            "pid": 4242, "visible": True, "client": (1024, 806), "origin": (0, 0),
+            "top": True,
+        }
+        self.fake.foreground = 0x4000
+        self.fake.process_path = lambda _pid: "/games/shikong/MyPCLauncher_x64r.exe"
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = win_probe.main(["--out", self.tmp.name, "--no-input", "--no-occlusion"])
+        self.assertEqual(code, 0)
+        scan = self.report()["meta"]["windowScan"]
+        self.assertEqual(scan["candidates"], 1)
+        self.assertFalse(scan["gameProcessFound"])
+
+    def test_exe_keyword_flag_counts_as_the_game(self):
+        """用户用 --exe-keyword 指定了进程名，就按他说的算游戏主程序。"""
+        self.fake = FullFakeProbeWin(with_game=False)
+        self.fake.windows[0x5000] = {
+            "title": "", "class": "__some_winclass__",
+            "pid": 5252, "visible": True, "client": (1600, 900), "origin": (0, 0),
+            "top": True,
+        }
+        self.fake.foreground = 0x5000
+        self.fake.process_path = lambda _pid: "/games/shikong/MyTabCtrl_x64r.exe"
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = win_probe.main(["--out", self.tmp.name, "--no-input", "--no-occlusion",
+                                   "--exe-keyword", "mytabctrl"])
+        self.assertEqual(code, 0)
+        self.assertTrue(self.report()["meta"]["windowScan"]["gameProcessFound"])
+
     def test_section_error_still_writes_report(self):
         """任何一段出错都必须留下报告，否则这趟实机就白跑了。"""
 
