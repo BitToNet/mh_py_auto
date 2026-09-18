@@ -305,7 +305,10 @@ def evaluate_verdict(probe_step: Dict[str, Any],
     probe_report = probe_step.get("report")
     smoke_report = smoke_step.get("report")
 
-    if probe_step.get("skipped"):
+    if probe_step.get("reused"):
+        # 复用上次的实测报告：数据是旧的，但确实是实测的，不算问题
+        pass
+    elif probe_step.get("skipped"):
         problems.append("探测被跳过（--skip-probe）：没有实测数据，配置只能靠猜。")
     elif not probe_report:
         problems.append(
@@ -631,10 +634,25 @@ def run_acceptance(out_dir: str, *,
     log("=" * 78)
 
     if skip_probe:
-        log("[1/3] 探测：跳过（--skip-probe）")
-        probe_step: Dict[str, Any] = {"skipped": True, "exitCode": None,
-                                     "report": None, "reportPath": None, "output": ""}
-        steps.append(step("probe", True, None, 0, "跳过"))
+        # --skip-probe 的用途是"探测我已经单独跑过了（比如带 --resize/--text 的完整实测），
+        # 这里只做汇总"，所以必须真的把上次那份报告读回来；只把 report 置空的话，
+        # 推荐和结论都会退化成"没有实测数据"。
+        reused_path = os.path.join(out_dir, "probe", PROBE_REPORT_NAME)
+        reused = _load_json(reused_path)
+        if reused:
+            log("[1/3] 探测：跳过（--skip-probe），复用 %s" % reused_path)
+            probe_step: Dict[str, Any] = {
+                "skipped": True, "reused": True, "exitCode": None,
+                "report": reused, "reportPath": reused_path,
+                "output": "（复用上次探测报告：%s）" % reused_path,
+            }
+            steps.append(step("probe", True, None, 0, "跳过（复用上次报告）",
+                              probe_step["output"]))
+        else:
+            log("[1/3] 探测：跳过（--skip-probe），但没找到上次的报告：%s" % reused_path)
+            probe_step = {"skipped": True, "reused": False, "exitCode": None,
+                          "report": None, "reportPath": reused_path, "output": ""}
+            steps.append(step("probe", True, None, 0, "跳过（没有可复用的报告）"))
     else:
         log("[1/3] 探测（只读%s）…" % ("，含输入测试" if with_input else "，不点游戏"))
         started = time.time()

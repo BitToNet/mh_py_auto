@@ -322,6 +322,46 @@ class RunAcceptanceTest(unittest.TestCase):
             )
         return report, code, buffer.getvalue()
 
+    def test_skip_probe_reuses_the_previous_report(self):
+        """--skip-probe 的用途是"探测我已经单独跑过（带 --resize/--text），这里只汇总"。
+
+        所以它必须真的把上次那份报告读回来：只把 report 置空的话，推荐会退化成
+        "没有实测数据，配置只能靠猜"，等于逼用户重跑一遍探测（会再点一次游戏）。
+        """
+        probe_report = make_report(methods=all_methods_ok())
+        self.fake_probe(probe_report)  # 先跑一次，把报告落到 <out>/probe/
+        self.run_it()
+        written = {}
+
+        def recorder(probe_report_path, smoke_report_path, force=False):
+            written["probe"] = probe_report_path
+            written["force"] = force
+            return {"exitCode": 0, "output": "已写入"}
+
+        report, code, log = self.run_it(
+            skip_probe=True, write_config=True, force=True,
+            probe_runner=self.fake_probe(None),
+            config_writer=recorder)
+        self.assertEqual(code, 0, report["verdict"]["problems"])
+        self.assertTrue(report["verdict"]["ok"], report["verdict"]["problems"])
+        self.assertFalse(any("探测被跳过" in item for item in report["verdict"]["problems"]))
+        # 复用的报告真的进了推荐，而不是空报告
+        self.assertEqual(report["recommendation"]["config"]["captureOrder"][0],
+                         "printwindow_renderfull")
+        # 写配置拿到的也是那份复用报告
+        self.assertEqual(os.path.basename(written["probe"]), "win_probe_report.json")
+        self.assertTrue(written["force"])
+        # 控制台和报告都要说清楚"这趟是复用的旧实测数据"
+        self.assertIn("复用 ", log)
+        self.assertEqual(report["steps"][0]["summary"], "跳过（复用上次报告）")
+
+    def test_skip_probe_without_a_report_is_still_a_problem(self):
+        report, code, log = self.run_it(skip_probe=True, probe_runner=self.fake_probe(None))
+        self.assertFalse(report["verdict"]["ok"])
+        self.assertTrue(any("探测被跳过" in item for item in report["verdict"]["problems"]))
+        self.assertIn("没找到上次的报告", log)
+        self.assertEqual(report["steps"][0]["summary"], "跳过（没有可复用的报告）")
+
     def test_writes_both_report_files_and_exits_zero(self):
         report, code, log = self.run_it()
         self.assertEqual(code, 0, report["verdict"]["problems"])
