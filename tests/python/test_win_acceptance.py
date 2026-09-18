@@ -126,6 +126,20 @@ class VerdictTest(unittest.TestCase):
         self.assertFalse(verdict["ok"])
         self.assertTrue(any("没有找到候选窗口" in item for item in verdict["problems"]))
 
+    def test_broken_enumeration_is_not_reported_as_missing_client(self):
+        """枚举到 0 个窗口时，结论必须是"枚举机制失效"，不能让人去重启游戏。"""
+        report = make_report(methods=[], targets=False)
+        report["meta"]["windowScan"] = {"totalTopLevel": 0, "candidates": 0,
+                                        "enumerationBroken": True}
+        verdict = win_acceptance.evaluate_verdict(
+            probe_step(report), good_recommendation(report),
+            smoke_step(smoke_report()))
+        self.assertFalse(verdict["ok"])
+        problems = " ".join(verdict["problems"])
+        self.assertIn("枚举", problems)
+        self.assertIn("不是客户端没启动", problems)
+        self.assertNotIn("确认《梦幻西游：时空》客户端已启动", problems)
+
     def test_all_capture_methods_dead_is_a_problem(self):
         methods = []
         for name in win_capture.DEFAULT_ORDER:
@@ -402,6 +416,50 @@ class MainCliTest(unittest.TestCase):
             code = win_acceptance.main(["--out", "acceptance_out_test"])
         self.assertEqual(code, 2)
         self.assertIn("只能在 Windows 上运行", buffer.getvalue())
+
+
+class ChildProcessEncodingTest(unittest.TestCase):
+    """父进程必须按 UTF-8 读子进程输出。
+
+    子脚本（win_probe / smoke_win）启动时会 ``sys.stdout.reconfigure(encoding='utf-8')``，
+    所以父进程用 ``text=True``（= 系统区域编码）去读就必然错位：中文 Windows 的区域
+    编码是 GBK，子进程一输出中文就抛 UnicodeDecodeError。实机上的表现是控制台一串
+    "Exception in thread Thread-1 (_readerthread)"，**并且那一段输出整段丢失**，
+    报告里"原始输出"只剩 ASCII 的 stderr。
+    """
+
+    CHILD = (
+        "import sys\n"
+        "sys.stdout.reconfigure(encoding='utf-8')\n"
+        "sys.stderr.reconfigure(encoding='utf-8')\n"
+        "print('候选窗口 0 个 · 中文输出')\n"
+        "sys.stderr.write('错误：没有找到候选窗口\\n')\n"
+    )
+
+    def run_child(self):
+        return win_acceptance.run_child_process(
+            [sys.executable, "-c", self.CHILD], timeout=60)
+
+    def test_non_ascii_output_round_trips(self):
+        exit_code, output = self.run_child()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("候选窗口 0 个", output)
+        self.assertIn("中文输出", output)
+        self.assertIn("错误：没有找到候选窗口", output)
+
+    def test_survives_a_gbk_locale_like_chinese_windows(self):
+        """把区域编码伪造成 GBK（中文 Windows 的真实情况），输出仍然完整可读。"""
+        import locale
+
+        original = locale.getencoding
+        locale.getencoding = lambda: "gbk"
+        try:
+            exit_code, output = self.run_child()
+        finally:
+            locale.getencoding = original
+        self.assertEqual(exit_code, 0)
+        self.assertIn("候选窗口 0 个", output)
+        self.assertIn("错误：没有找到候选窗口", output)
 
 
 if __name__ == "__main__":

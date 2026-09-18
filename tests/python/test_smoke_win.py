@@ -89,13 +89,27 @@ class SmokeScriptTest(unittest.TestCase):
     def test_no_device(self):
         smoke_win.RESULTS.clear()
         empty = win_device.WindowsBackend(config={"jitterRadius": 0}, api=FakeWin32Api())
-        with contextlib.redirect_stdout(io.StringIO()):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
             code = smoke_win.main(["--out", self.tmp.name], backend=empty)
         report = self.report()
         self.assertEqual(code, 1)
         self.assertGreater(report["failed"], 0)
         self.assertFalse(any(item["name"] == "存在可测设备" and item["ok"]
                              for item in report["results"]))
+        # 枚举本身也要被检查，并且不能说成"客户端没启动"
+        self.assertFalse(any(item["name"] == "窗口枚举可用" and item["ok"]
+                             for item in report["results"]))
+        self.assertIn("枚举机制本身失效", buffer.getvalue())
+        self.assertNotIn("请确认客户端已启动", buffer.getvalue())
+
+    def test_enumeration_check_passes_when_windows_exist(self):
+        code = self.run_smoke(["--out", self.tmp.name])
+        self.assertEqual(code, 0)
+        listed = [item for item in self.report()["results"] if item["name"] == "窗口枚举可用"]
+        self.assertEqual(len(listed), 1)
+        self.assertTrue(listed[0]["ok"])
+        self.assertIn("个顶层窗口", listed[0]["detail"])
 
     def test_unknown_device_filter(self):
         code = self.run_smoke(["--out", self.tmp.name, "--device", "win:9999"])

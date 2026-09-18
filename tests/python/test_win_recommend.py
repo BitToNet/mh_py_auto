@@ -65,6 +65,40 @@ def all_methods_ok():
     return [make_method(name) for name in win_capture.DEFAULT_ORDER]
 
 
+class EnumerationBrokenTest(unittest.TestCase):
+    """枚举到 0 个窗口 ≠ 没找到游戏窗口：两者要给出不同的话。"""
+
+    def test_flag_read_from_window_scan(self):
+        report = make_report(targets=False)
+        report["meta"]["windowScan"] = {"totalTopLevel": 0, "candidates": 0,
+                                        "enumerationBroken": True}
+        self.assertTrue(win_recommend.enumeration_broken(report))
+
+    def test_flag_read_from_legacy_meta_key(self):
+        report = make_report(targets=False)
+        report["meta"]["enumerationBroken"] = True
+        self.assertTrue(win_recommend.enumeration_broken(report))
+
+    def test_missing_meta_is_not_broken(self):
+        self.assertFalse(win_recommend.enumeration_broken({}))
+        self.assertFalse(win_recommend.enumeration_broken({"meta": None}))
+        self.assertFalse(win_recommend.enumeration_broken(make_report(targets=False)))
+
+    def test_warning_points_at_enumeration_not_at_the_game(self):
+        report = make_report(targets=False)
+        report["meta"]["windowScan"] = {"totalTopLevel": 0, "candidates": 0,
+                                        "enumerationBroken": True}
+        result = win_recommend.recommend(report)
+        warning = " ".join(result["warnings"])
+        self.assertIn("枚举机制本身失效", warning)
+        self.assertIn("不是客户端没启动", warning)
+
+    def test_normal_missing_window_keeps_the_old_advice(self):
+        result = win_recommend.recommend(make_report(targets=False))
+        warning = " ".join(result["warnings"])
+        self.assertIn("确认客户端已启动", warning)
+
+
 class RecommendCoreTest(unittest.TestCase):
     def test_all_backends_usable_keeps_default_order(self):
         result = win_recommend.recommend(make_report(methods=all_methods_ok()))
@@ -385,18 +419,16 @@ class ProbeReportCompatibilityTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.previous = (win_probe.WIN, win_probe.Win32, win_probe.WNDPROC,
-                         win_probe.IS_WINDOWS)
+        self.previous = (win_probe.WIN, win_probe.Win32, win_probe.IS_WINDOWS)
         win_probe.IS_WINDOWS = True
-        win_probe.WNDPROC = staticmethod(lambda callback: callback)
+        # 不替换 ENUMPROC：假 API 调的就是真 ctypes 回调对象，枚举回调原型错了会当场失败
         self.fake = FullFakeProbeWin()
         win_probe.WIN = self.fake
         win_probe.Win32 = lambda: self.fake
         self.addCleanup(self._restore)
 
     def _restore(self):
-        (win_probe.WIN, win_probe.Win32, win_probe.WNDPROC,
-         win_probe.IS_WINDOWS) = self.previous
+        (win_probe.WIN, win_probe.Win32, win_probe.IS_WINDOWS) = self.previous
 
     def test_real_probe_report_drives_a_config(self):
         with contextlib.redirect_stdout(io.StringIO()):

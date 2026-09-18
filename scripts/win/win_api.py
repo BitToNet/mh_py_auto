@@ -42,6 +42,12 @@ LPARAM = ctypes.c_ssize_t
 LRESULT = ctypes.c_ssize_t
 ULONG_PTR = ctypes.c_size_t
 WNDPROC = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(LRESULT, HWND, UINT, WPARAM, LPARAM)
+# EnumWindows / EnumChildWindows 的回调（EnumWindowsProc）只有 **两个** 参数：(HWND, LPARAM)。
+# 它和窗口过程 WNDPROC（4 个参数）是完全不同的原型，不能混用：
+# ctypes 按原型传参，用 WNDPROC 包出来的回调用 4 个参数去调用 2 个参数的 Python 函数，
+# 真机上直接 TypeError，而回调里的异常会被 ctypes 吞掉并返回 0，
+# 于是 EnumWindows 认为"回调要求停止"立刻返回 → 窗口列表恒为空。
+ENUMPROC = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(BOOL, HWND, LPARAM)
 HHOOK = ctypes.c_void_p
 HOOKPROC = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(LRESULT, ctypes.c_int, WPARAM, LPARAM)
 
@@ -208,6 +214,19 @@ SEND_TIMEOUT_MS = 800
 # --------------------------------------------------------------------------------------
 # Win32 API 封装
 # --------------------------------------------------------------------------------------
+def declare_enum_prototypes(user32: Any) -> None:
+    """声明枚举窗口用的回调原型。
+
+    单独抽成模块级函数是为了能在 macOS 上单测：完整的 ``Win32Api._declare``
+    需要真正的 Windows DLL，而这里只要一个假 user32 就能验证
+    "EnumWindows 用的确实是 2 参数的 ENUMPROC，不是 4 参数的 WNDPROC"。
+    """
+    user32.EnumWindows.argtypes = [ENUMPROC, LPARAM]
+    user32.EnumWindows.restype = BOOL
+    user32.EnumChildWindows.argtypes = [HWND, ENUMPROC, LPARAM]
+    user32.EnumChildWindows.restype = BOOL
+
+
 class Win32Api:
     """底层 Win32 调用集合。每个方法都是"薄封装"，方便测试时整体替换。"""
 
@@ -227,10 +246,7 @@ class Win32Api:
     def _declare(self) -> None:
         u, g, k = self.user32, self.gdi32, self.kernel32
 
-        u.EnumWindows.argtypes = [WNDPROC, LPARAM]
-        u.EnumWindows.restype = BOOL
-        u.EnumChildWindows.argtypes = [HWND, WNDPROC, LPARAM]
-        u.EnumChildWindows.restype = BOOL
+        declare_enum_prototypes(u)
         u.GetWindowTextLengthW.argtypes = [HWND]
         u.GetWindowTextLengthW.restype = ctypes.c_int
         u.GetWindowTextW.argtypes = [HWND, LPWSTR, ctypes.c_int]
@@ -401,7 +417,7 @@ class Win32Api:
             out.append(hwnd_int(hwnd))
             return True
 
-        proc = WNDPROC(cb)
+        proc = ENUMPROC(cb)
         self.user32.EnumWindows(proc, 0)
         return out
 
@@ -412,7 +428,7 @@ class Win32Api:
             out.append(hwnd_int(child))
             return True
 
-        proc = WNDPROC(cb)
+        proc = ENUMPROC(cb)
         self.user32.EnumChildWindows(HWND(hwnd), proc, 0)
         return out
 

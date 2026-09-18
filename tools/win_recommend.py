@@ -121,6 +121,22 @@ def _smoke_notes(smoke: Optional[Dict[str, Any]]) -> Tuple[Optional[str], List[s
     return (str(chosen) if chosen else None), notes
 
 
+def enumeration_broken(report: Dict[str, Any]) -> bool:
+    """探测报告是否表明"窗口枚举这一步本身就失败了"。
+
+    这与"没找到游戏窗口"是两回事：交互式桌面上永远有顶层窗口，枚举到 0 个
+    只可能是枚举机制失效（回调/ctypes 报错、不在交互式桌面会话）。
+    验收工具也用这一条来避免把结论写成"客户端没启动"。
+    """
+    meta = report.get("meta")
+    if not isinstance(meta, dict):
+        return False
+    scan = meta.get("windowScan")
+    if isinstance(scan, dict) and scan.get("enumerationBroken"):
+        return True
+    return bool(meta.get("enumerationBroken"))
+
+
 def recommend(report: Dict[str, Any],
               smoke: Optional[Dict[str, Any]] = None,
               black_ratio_max: float = win_capture.DEFAULT_BLACK_RATIO_MAX,
@@ -136,8 +152,13 @@ def recommend(report: Dict[str, Any],
 
     target = _first_target(report)
     if target is None:
-        warnings.append("报告里没有候选窗口：请先在 Windows 上跑 tools\\win_probe.py，"
-                        "确认客户端已启动且不是最小化。")
+        if enumeration_broken(report):
+            warnings.append("窗口枚举返回 0 个窗口：枚举机制本身失效（回调/ctypes 报错，"
+                            "或进程不在交互式桌面会话），不是客户端没启动；"
+                            "先看探测工具完整输出里的 traceback 再重跑。")
+        else:
+            warnings.append("报告里没有候选窗口：请先在 Windows 上跑 tools\\win_probe.py，"
+                            "确认客户端已启动且不是最小化。")
         return {"config": config, "notes": notes, "warnings": warnings, "measured": False}
 
     tag = target_tag(target)

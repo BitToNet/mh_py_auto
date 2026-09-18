@@ -34,6 +34,7 @@ if WIN_DIR not in sys.path:
 import win_api  # noqa: E402
 import win_capture  # noqa: E402
 import win_device  # noqa: E402
+import win_window  # noqa: E402
 import win_input  # noqa: E402
 
 RESULTS: List[Tuple[str, bool, str]] = []
@@ -44,6 +45,11 @@ def record(name: str, ok: bool, detail: str = "") -> bool:
     flag = "PASS" if ok else "FAIL"
     print(f"  [{flag}] {name}" + (f" — {detail}" if detail else ""))
     return bool(ok)
+
+
+def check_passed(name: str) -> bool:
+    """某个检查项是否已经通过（用来给后面的结论选正确的说法）。"""
+    return any(item_name == name and ok for item_name, ok, _ in RESULTS)
 
 
 def _grab(backend: win_device.WindowsBackend, device, method: Optional[str] = None
@@ -103,6 +109,16 @@ def check_health(backend: win_device.WindowsBackend, out_dir: str) -> Dict[str, 
 
 def check_devices(backend: win_device.WindowsBackend) -> List[win_device.WinDevice]:
     print("\n== 2. 客户端实例枚举 ==")
+    # 先确认"枚举"本身可用：交互式桌面上永远有顶层窗口，一个都没有说明枚举机制
+    # 失效（枚举回调/ctypes 报错、进程不在交互式桌面会话），而不是游戏没启动。
+    all_windows = win_window.list_windows(
+        api=backend.api,
+        include_other=True,
+        game_patterns=backend.config["gameExePatterns"],
+        launcher_patterns=backend.config["launcherExePatterns"],
+        title_keywords=backend.config["titleKeywords"],
+    )
+    record("窗口枚举可用", bool(all_windows), f"枚举到 {len(all_windows)} 个顶层窗口")
     devices = backend.refresh()
     record("找到时空客户端窗口", bool(devices), f"{len(devices)} 个实例")
     for device in devices:
@@ -252,7 +268,11 @@ def main(argv: Optional[Sequence[str]] = None,
                 print(f"指定的设备不存在：{args.device}")
                 return 1
         if not devices:
-            print("\n没有找到时空客户端窗口，请确认客户端已启动且不是最小化。")
+            if not check_passed("窗口枚举可用"):
+                print("\n窗口枚举返回 0 个顶层窗口：枚举机制本身失效（不是客户端没启动），"
+                      "请看上面的报错与完整输出。")
+            else:
+                print("\n没有找到时空客户端窗口，请确认客户端已启动且不是最小化。")
             record("存在可测设备", False)
         else:
             if args.input and not args.yes:

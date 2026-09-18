@@ -59,6 +59,12 @@ LPARAM = ctypes.c_ssize_t
 LRESULT = ctypes.c_ssize_t
 ULONG_PTR = ctypes.c_size_t
 WNDPROC = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(LRESULT, HWND, UINT, WPARAM, LPARAM)
+# EnumWindows / EnumChildWindows 的回调（EnumWindowsProc）只有 **两个** 参数：(HWND, LPARAM)。
+# 它和窗口过程 WNDPROC（4 个参数）不能混用：ctypes 按原型传参，用 WNDPROC 包出来的回调
+# 会用 4 个参数去调用 2 个参数的 Python 函数，真机上直接 TypeError；回调里的异常被 ctypes
+# 吞掉并返回 0，EnumWindows 便认为"要求停止"立刻返回 → 窗口列表恒为空。
+# 这正是实机报告里 "cb() takes 2 positional arguments but 4 were given" 的根因。
+ENUMPROC = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(BOOL, HWND, LPARAM)
 
 
 class RECT(ctypes.Structure):
@@ -236,6 +242,19 @@ def _maybe_save(out_dir: str, tag: str, name: str, buf: bytes, width: int, heigh
 # --------------------------------------------------------------------------------------
 # Win32 绑定
 # --------------------------------------------------------------------------------------
+def declare_enum_prototypes(user32: Any) -> None:
+    """声明枚举窗口用的回调原型。
+
+    抽成模块级函数是为了能在 macOS 上单测：完整 ``Win32._declare`` 需要真正的
+    Windows DLL，而这里给一个假 user32 就能验证 EnumWindows 用的确实是
+    2 参数的 ENUMPROC（不是 4 参数的 WNDPROC）。
+    """
+    user32.EnumWindows.argtypes = [ENUMPROC, LPARAM]
+    user32.EnumWindows.restype = BOOL
+    user32.EnumChildWindows.argtypes = [HWND, ENUMPROC, LPARAM]
+    user32.EnumChildWindows.restype = BOOL
+
+
 class Win32:
     """按需加载 DLL，避免非 Windows 平台 import 报错。"""
 
@@ -252,10 +271,7 @@ class Win32:
     def _declare(self) -> None:
         u, g, k = self.user32, self.gdi32, self.kernel32
 
-        u.EnumWindows.argtypes = [WNDPROC, LPARAM]
-        u.EnumWindows.restype = BOOL
-        u.EnumChildWindows.argtypes = [HWND, WNDPROC, LPARAM]
-        u.EnumChildWindows.restype = BOOL
+        declare_enum_prototypes(u)
         u.GetWindowTextLengthW.argtypes = [HWND]
         u.GetWindowTextLengthW.restype = ctypes.c_int
         u.GetWindowTextW.argtypes = [HWND, LPWSTR, ctypes.c_int]
@@ -620,7 +636,7 @@ def _enum_child_windows(hwnd: int) -> List[Dict[str, Any]]:
         })
         return True
 
-    proc = WNDPROC(cb)
+    proc = ENUMPROC(cb)
     w.user32.EnumChildWindows(HWND(hwnd), proc, 0)
     return out
 
@@ -683,7 +699,7 @@ def list_windows(exe_keywords: Sequence[str], title_keywords: Sequence[str],
         results.append(info)
         return True
 
-    w.user32.EnumWindows(WNDPROC(cb), 0)
+    w.user32.EnumWindows(ENUMPROC(cb), 0)
     return results
 
 
@@ -1307,8 +1323,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         include_all=bool(args.all_windows or args.hwnd or args.pid),
     )
     candidates = [w for w in windows if w.is_candidate]
+    total_windows = len(windows)
+    # 交互式 Windows 桌面上永远存在可见顶层窗口（桌面、任务栏、输入法、其它程序），
+    # 一个都枚举不到说明"枚举"这一步本身不成立：要么枚举回调/ctypes 层出错
+    # （异常被 ctypes 吞掉，比如回调原型写错），要么本进程不在交互式桌面会话
+    # （以服务、计划任务"不显示界面"方式运行）。这时把结论说成"客户端没启动"
+    # 会把人带偏——实机验收报告里就出现过这种情况。
+    enumeration_broken = total_windows == 0
 
-    print(f"共枚举到 {len(windows)} 个可见顶层窗口，其中候选 {len(candidates)} 个：")
+    print(f"共枚举到 {total_windows} 个可见顶层窗口，其中候选 {len(candidates)} 个：")
     for idx, info in enumerate(candidates, 1):
         flag = " *前台*" if info.foreground else ""
         mini = " (最小化)" if info.minimized else ""
@@ -1316,7 +1339,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"      标题={info.title!r}")
         print(f"      进程={info.exe_name} 客户区={info.client_width}x{info.client_height} "
               f"dpi={info.dpi} 可调整={info.resizable}{flag}{mini}")
-    if not candidates:
+    if enumeration_broken:
+        print()
+        print("！！窗口枚举返回 0 个窗口：交互式 Windows 桌面上不可能出现这种情况。")
+        print("   所以这不是「客户端没启动」，而是枚举机制本身失效：")
+        print("   1) 枚举回调/ctypes 层报错（看本脚本输出里有没有 TypeError 之类 traceback）")
+        print("   2) 本进程不在交互式桌面会话（以服务、计划任务「不显示界面」方式运行）")
+        print("   3) 解释器位数 / 系统 DLL 异常")
+        print("   请把完整输出一起反馈，先别去重启游戏。")
+    elif not candidates:
         print()
         print("！！没有找到候选窗口。请确认：")
         print("   1) 《梦幻西游：时空》客户端已经启动并且是窗口化模式（不是最小化）")
@@ -1343,6 +1374,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "exe_keywords": exe_keywords,
             "title_keywords": title_keywords,
             "deps": dependency_versions(),
+            # 枚举自检：0 个顶层窗口 = 枚举本身失效，不是"没找到游戏窗口"
+            "windowScan": {
+                "totalTopLevel": total_windows,
+                "candidates": len(candidates),
+                "enumerationBroken": enumeration_broken,
+            },
         },
         "windows": [asdict(w) for w in (windows if args.all_windows else candidates)],
         "targets": [],

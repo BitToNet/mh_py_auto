@@ -69,21 +69,40 @@ def _tail(text: str, limit: int = OUTPUT_TAIL_CHARS) -> str:
     return "…（前面省略）\n" + text[-limit:]
 
 
-def _run_child(script: str, arguments: Sequence[str], timeout: int) -> Dict[str, Any]:
-    """跑一个子进程脚本，把标准输出/错误一起收下来（不接管终端）。"""
+def run_child_process(argv: Sequence[str], timeout: int) -> Tuple[int, str]:
+    """跑一个子进程，把标准输出/错误按 **UTF-8** 一起收下来。
+
+    子脚本（win_probe / smoke_win / win_recommend）启动时都会调
+    ``ensure_utf8_stdout()`` 把 stdout/stderr 切成 UTF-8，所以父进程必须同样按
+    UTF-8 解码。``text=True`` 不加 encoding 时走系统区域编码（中文 Windows 是 GBK），
+    子进程一输出中文就抛 UnicodeDecodeError —— 而异常发生在 subprocess 的读取线程里，
+    表现是控制台一串看不懂的 traceback，并且**那一整段输出会丢失**
+    （报告"原始输出"里只剩 ASCII 的 stderr）。
+    """
     import subprocess
 
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    completed = subprocess.run(
+        list(argv),
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=timeout,
+    )
+    return completed.returncode, (completed.stdout or "") + (completed.stderr or "")
+
+
+def _run_child(script: str, arguments: Sequence[str], timeout: int) -> Dict[str, Any]:
+    """跑一个子进程脚本，把标准输出/错误一起收下来（不接管终端）。"""
     started = time.time()
     try:
-        completed = subprocess.run(
-            [sys.executable, os.path.join(TOOLS_DIR, script)] + list(arguments),
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        output = (completed.stdout or "") + (completed.stderr or "")
-        return {"exitCode": completed.returncode, "output": output}
+        exit_code, output = run_child_process(
+            [sys.executable, os.path.join(TOOLS_DIR, script)] + list(arguments), timeout)
+        return {"exitCode": exit_code, "output": output}
     except Exception as exc:  # noqa: BLE001
         return {"exitCode": -1, "output": "执行 %s 失败：%r" % (script, exc),
                 "seconds": time.time() - started}
@@ -264,6 +283,18 @@ def summarize_keyboard(probe_report: Optional[Dict[str, Any]]) -> List[Dict[str,
     return rows
 
 
+def _enumeration_broken(probe_report: Optional[Dict[str, Any]]) -> bool:
+    """探测报告是否表明"窗口枚举本身失效"（与"没找到游戏窗口"不同）。"""
+    try:
+        import win_recommend  # noqa: PLC0415
+
+        return bool(win_recommend.enumeration_broken(probe_report or {}))
+    except Exception:  # noqa: BLE001
+        meta = (probe_report or {}).get("meta") or {}
+        scan = meta.get("windowScan") or {}
+        return bool(scan.get("enumerationBroken") or meta.get("enumerationBroken"))
+
+
 def evaluate_verdict(probe_step: Dict[str, Any],
                      recommendation: Dict[str, Any],
                      smoke_step: Dict[str, Any],
@@ -284,7 +315,14 @@ def evaluate_verdict(probe_step: Dict[str, Any],
     else:
         devices = summarize_devices(probe_report)
         if not devices:
-            problems.append("没有找到候选窗口：确认《梦幻西游：时空》客户端已启动且没最小化。")
+            if _enumeration_broken(probe_report):
+                problems.append(
+                    "窗口枚举返回 0 个窗口：枚举机制本身失效（枚举回调/ctypes 报错，"
+                    "或进程不在交互式桌面会话），**不是客户端没启动**；"
+                    "请看探测那一段的完整输出。"
+                )
+            else:
+                problems.append("没有找到候选窗口：确认《梦幻西游：时空》客户端已启动且没最小化。")
         elif len(devices) > 1:
             # 多开不是问题，只是需要知道后端选择按第一个窗口定
             pass

@@ -113,6 +113,8 @@ class FakePointer:
         return int(self.windows[_as_int(hwnd)].get("style" if index == -16 else "exstyle", 0))
 
     def EnumWindows(self, callback, lparam):
+        # callback 是真的 ctypes 回调对象：原型不匹配时回调体不会执行
+        # （ctypes 吞掉异常），列表随之缺项，断言立刻失败
         for hwnd in list(self.windows):
             callback(hwnd, lparam)
         return True
@@ -163,15 +165,14 @@ class ListWindowsTest(unittest.TestCase):
                      "visible": True, "client": (800, 600), "minimized": True},
         }
         self.previous = win_probe.WIN
-        self.previous_wndproc = win_probe.WNDPROC
         win_probe.WIN = FakeProbeWin(self.windows, foreground=0x1000)
-        # 假 API 直接以 (hwnd, lparam) 调回调，跳过 ctypes 原型包装（真机由系统调用）
-        win_probe.WNDPROC = staticmethod(lambda callback: callback)
+        # 注意：这里**不能**把 win_probe.ENUMPROC 换成恒等函数。
+        # 假 API 调用的就是真的 ctypes 回调对象，回调原型不匹配（比如误用 4 参数的
+        # WNDPROC 包 2 参数的枚举回调）会立刻在这里暴露，而不是留到 Windows 实机上。
         self.addCleanup(self._restore)
 
     def _restore(self):
         win_probe.WIN = self.previous
-        win_probe.WNDPROC = self.previous_wndproc
 
     def test_filters_and_flags(self):
         result = win_probe.list_windows(("mygame",), ("梦幻西游",))
@@ -500,10 +501,9 @@ class ProbeMainTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.previous_win = win_probe.WIN
         self.previous_win32 = win_probe.Win32
-        self.previous_wndproc = win_probe.WNDPROC
         self.previous_is_windows = win_probe.IS_WINDOWS
         win_probe.IS_WINDOWS = True          # 让 main 走 Windows 分支
-        win_probe.WNDPROC = staticmethod(lambda callback: callback)
+        # 同 ListWindowsTest：不替换 ENUMPROC，让假 API 走真的 ctypes 回调原型
         self.fake = FullFakeProbeWin()
         win_probe.WIN = self.fake
         # main() 里会 WIN = Win32()：把工厂也换掉（真机上才是真的 ctypes.WinDLL）
@@ -513,7 +513,6 @@ class ProbeMainTest(unittest.TestCase):
     def _restore(self):
         win_probe.WIN = self.previous_win
         win_probe.Win32 = self.previous_win32
-        win_probe.WNDPROC = self.previous_wndproc
         win_probe.IS_WINDOWS = self.previous_is_windows
 
     def run_probe(self, *args):
@@ -609,6 +608,31 @@ class ProbeMainTest(unittest.TestCase):
         report = self.report()
         self.assertEqual(report["targets"], [])
         self.assertEqual(report["capture"], {})
+
+    def test_zero_windows_is_reported_as_broken_enumeration(self):
+        """枚举到 0 个顶层窗口 ≠ 客户端没启动。
+
+        交互式桌面上永远有顶层窗口，一个都没有只能是枚举机制本身失效
+        （ctypes 回调报错、进程不在交互式桌面会话）。报告必须把这条讲清楚，
+        否则会把人带去"重启游戏"的错误方向——实机验收报告里就这么误导过一次。
+        """
+        self.fake = FullFakeProbeWin(with_game=False)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = win_probe.main(["--out", self.tmp.name, "--no-input", "--no-occlusion"])
+        self.assertEqual(code, 1)
+        scan = self.report()["meta"]["windowScan"]
+        self.assertEqual(scan["totalTopLevel"], 0)
+        self.assertTrue(scan["enumerationBroken"])
+        output = buffer.getvalue()
+        self.assertIn("枚举机制本身失效", output)
+        self.assertNotIn("客户端已经启动", output)
+
+    def test_window_scan_is_recorded_when_windows_exist(self):
+        self.assertEqual(self.run_probe("--no-input", "--no-occlusion", "--no-save-shots"), 0)
+        scan = self.report()["meta"]["windowScan"]
+        self.assertGreater(scan["totalTopLevel"], 0)
+        self.assertFalse(scan["enumerationBroken"])
 
     def test_section_error_still_writes_report(self):
         """任何一段出错都必须留下报告，否则这趟实机就白跑了。"""
